@@ -1,0 +1,7 @@
+{
+  "title": "RAGFlow Enterprise AI", "schemaVersion": 39,
+  "panels": [
+    {"type":"stat","title":"Agent requests","targets":[{"expr":"agent_requests_total"}]},
+    {"type":"stat","title":"Indexed documents","targets":[{"expr":"ragflow_documents_total"}]}
+  ]
+}
