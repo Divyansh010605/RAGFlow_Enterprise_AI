@@ -150,19 +150,4 @@ GEMINI_MODEL=gemini-2.5-flash
 
 ---
 
-## 📡 API Reference
 
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/api/auth/register` | Register new user account |
-| `POST` | `/api/auth/login` | Authenticate user & return JWT token |
-| `GET` | `/api/documents` | List indexed documents for active user |
-| `POST` | `/api/documents/upload` | Upload & index file (`.pdf`, `.docx`, `.txt`, `.csv`, `.xlsx`, `.md`) |
-| `DELETE` | `/api/documents/{id}` | Remove document and index chunks |
-| `POST` | `/api/chat` | Send chat query to selected agent (`agent_id`) |
-| `GET` | `/api/agents` | List active agent statistics & run counts |
-| `POST` | `/api/agents/{id}/invoke` | Directly invoke a specific agent |
-| `POST` | `/api/sql/query` | Execute safe, read-only SQL queries |
-| `GET` | `/api/analytics/overview` | Fetch workspace performance analytics |
-
----
