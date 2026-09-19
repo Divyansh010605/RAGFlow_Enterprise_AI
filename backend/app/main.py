@@ -5,6 +5,7 @@ from time import perf_counter
 import re
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import PlainTextResponse
 from .config import CORS_ORIGINS, MAX_UPLOAD_BYTES
 from .database import connection, initialize
 from .models import ChatRequest, LoginRequest, RegisterRequest, SQLRequest
@@ -22,26 +23,34 @@ def startup(): initialize()
 @app.get("/health")
 def health(): return {"status":"healthy","services":{"database":"ready","retrieval":"local-hybrid","graph":"local-adapter"}}
 
-@app.get("/metrics")
+@app.get("/metrics", response_class=PlainTextResponse)
 def metrics():
     with connection() as conn:
         runs=conn.execute("SELECT count(*) c FROM agent_runs").fetchone()["c"]
         docs=conn.execute("SELECT count(*) c FROM documents").fetchone()["c"]
-    return f"agent_requests_total {runs}\nragflow_documents_total {docs}\n"
+    return (
+        f"# HELP agent_requests_total Total number of agent runs executed.\n"
+        f"# TYPE agent_requests_total counter\n"
+        f"agent_requests_total {runs}\n"
+        f"# HELP ragflow_documents_total Total documents indexed in workspace.\n"
+        f"# TYPE ragflow_documents_total gauge\n"
+        f"ragflow_documents_total {docs}\n"
+    )
 
 @app.post("/api/auth/register")
 def register(body:RegisterRequest):
-    with connection() as conn: is_first = not bool(conn.execute("SELECT 1 FROM users LIMIT 1").fetchone())
-    # Never let later public registrations self-assign a privileged role.
-    assigned_role = "admin" if is_first else "employee"
-    user={"id":str(uuid4()),"name":body.name,"email":str(body.email).lower(),"role":assigned_role}
-    try:
-        with connection() as conn: conn.execute("INSERT INTO users(id,name,email,password_hash,role) VALUES(?,?,?,?,?)", (*user.values(),hash_password(body.password)))
-    except Exception as exc:
-        if "UNIQUE" in str(exc): raise HTTPException(409,"Email already registered")
-        raise
-    audit(user["id"],"register","user")
-    return {"access_token":token_for(user),"token_type":"bearer","user":user}
+    user_id = str(uuid4())
+    with connection() as conn:
+        is_first = not bool(conn.execute("SELECT 1 FROM users LIMIT 1").fetchone())
+        assigned_role = "admin" if is_first else "employee"
+        user = {"id": user_id, "name": body.name, "email": str(body.email).lower(), "role": assigned_role}
+        try:
+            conn.execute("INSERT INTO users(id,name,email,password_hash,role) VALUES(?,?,?,?,?)", (*user.values(), hash_password(body.password)))
+        except Exception as exc:
+            if "UNIQUE" in str(exc): raise HTTPException(409, "Email already registered")
+            raise
+    audit(user["id"], "register", "user")
+    return {"access_token": token_for(user), "token_type": "bearer", "user": user}
 
 @app.post("/api/auth/login")
 def login(body:LoginRequest):
@@ -82,7 +91,7 @@ async def upload(file:UploadFile=File(...), user=Depends(current_user)):
     if len(raw)>MAX_UPLOAD_BYTES: raise HTTPException(413,"File exceeds upload limit")
     text=extract(file.filename or "upload.txt",raw)
     if len(text.strip()) < 3: raise HTTPException(422,"No extractable text found")
-    if re.search(r"ignore (all |previous )?instructions|reveal .*confidential|system prompt",text,re.I):
+    if re.search(r"(?i)\bignore\s+(all\s+|previous\s+)?instructions\b|\breveal\s+(the\s+)?(system\s+prompt|confidential\b)|\bdeveloper\s+mode\s+output\b", text):
         audit(user["id"],"blocked_prompt_injection",file.filename or "upload"); raise HTTPException(422,"Document blocked by prompt-injection guard")
     did=str(uuid4()); pieces=chunk(text)
     # BUG-12/21 fix: store a 200-char preview in content so the documents list is useful
@@ -118,6 +127,11 @@ def reindex(user=Depends(current_user)):
 @app.post("/api/sql/query")
 def safe_sql(body:SQLRequest,user=Depends(current_user)):
     query=validate_read_only_sql(body.query)
+    # Restrict SQL execution exclusively to analytical data (sales table) to prevent cross-tenant extraction
+    sql_tokens = set(re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", query.lower()))
+    restricted_tables = {"users", "chunks", "documents", "audit_logs", "conversations", "messages", "agent_runs", "sqlite_master"}
+    if sql_tokens.intersection(restricted_tables):
+        raise HTTPException(403, "Access to system tables is restricted. Only the sales table can be queried.")
     try:
         with connection() as conn: rows=[dict(row) for row in conn.execute(query).fetchall()]
     except Exception as exc: raise HTTPException(422, f"SQL execution rejected: {exc}")
@@ -153,11 +167,16 @@ def chat(body:ChatRequest,user=Depends(current_user)):
 
     cid = body.conversation_id or str(uuid4())
     with connection() as conn:
+        if body.conversation_id:
+            existing = conn.execute("SELECT user_id FROM conversations WHERE id=?", (cid,)).fetchone()
+            if existing and existing["user_id"] != user["id"]:
+                raise HTTPException(403, "Access denied to conversation")
         conn.execute("INSERT OR IGNORE INTO conversations(id,user_id,title) VALUES(?,?,?)", (cid, user["id"], body.query[:80]))
         conn.executemany("INSERT INTO messages(id,conversation_id,role,content) VALUES(?,?,?,?)", [(str(uuid4()), cid, "user", body.query), (str(uuid4()), cid, "assistant", result["answer"])])
         conn.execute("INSERT INTO agent_runs(id,user_id,query,status,latency_ms,agent_id) VALUES(?,?,?,?,?,?)", (str(uuid4()), user["id"], body.query, "completed", result.get("workflow", {}).get("latency_ms", 1), agent_id))
     audit(user["id"], f"chat:{agent_id}", cid)
     return {"conversation_id": cid, "agent_id": agent_id, **result}
+
 
 @app.get("/api/chat/{conversation_id}")
 def history(conversation_id:str,user=Depends(current_user)):

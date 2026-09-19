@@ -126,13 +126,23 @@ def run(query: str, user_id: str) -> dict:
         for job in jobs: state.evidence.extend(job.result())
     evaluate(state)
     if state.evaluation_score < .34 and "documents" in state.sources:
-        state.retries = 1; state.evidence.extend(search(" ".join(re.findall(r"\w+", query)), user_id, 8))
+        state.retries = 1
+        stop_words = {"what", "is", "the", "a", "an", "in", "on", "of", "and", "or", "to", "for", "with", "how", "why", "can", "you", "tell", "me", "about", "show", "get", "find"}
+        filtered_terms = [w for w in re.findall(r"\w+", query) if w.lower() not in stop_words and len(w) > 2]
+        fallback_q = " ".join(filtered_terms) if filtered_terms else query
+        new_evidence = search(fallback_q, user_id, 8)
+        existing_ids = {e.get("chunk_id") for e in state.evidence if e.get("chunk_id")}
+        for item in new_evidence:
+            if item.get("chunk_id") not in existing_ids:
+                state.evidence.append(item)
+                existing_ids.add(item.get("chunk_id"))
         evaluate(state)
     answer = response(state)
     citations = [{"source": e.get("filename", e.get("source", "unknown")), "document_id": e.get("document_id"), "score": e.get("score", 1)} for e in state.evidence[:5]]
     result = {"answer": answer, "citations": citations, "confidence": round(state.evaluation_score, 2), "workflow": {"intent": state.intent, "complexity": state.complexity, "sources": state.sources, "plan": state.plan, "retries": state.retries, "latency_ms": round((perf_counter() - started) * 1000), "cache_hit": False}}
     cache.put(cache_key, result)
     return result
+
 
 # ── Individual Agent Invokers ──────────────────────────────────────────────────
 

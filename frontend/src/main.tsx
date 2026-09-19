@@ -49,10 +49,23 @@ async function api(path: string, opts: RequestInit = {}, token = '') {
   return body;
 }
 
+function parseIsoDate(d?: string): Date | null {
+  if (!d) return null;
+  const iso = d.includes('T') ? d : d.replace(' ', 'T');
+  return new Date(iso.endsWith('Z') ? iso : iso + 'Z');
+}
+
 // ── App ───────────────────────────────────────────────────────────────────────
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem('token') || '');
-  const [user, setUser] = useState<{ name: string; role: string } | null>(null);
+  const [user, setUser] = useState<{ name: string; role: string } | null>(() => {
+    try {
+      const saved = localStorage.getItem('user');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
   const [page, setPage] = useState('Chat');
 
   // Auth form state
@@ -92,6 +105,7 @@ function App() {
 
   function signOut() {
     localStorage.removeItem('token');
+    localStorage.removeItem('user');
     setToken('');
     setUser(null);
     setMessages([]);
@@ -127,6 +141,7 @@ function App() {
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(isRegister ? { name, email, password } : { email, password }) }
       );
       localStorage.setItem('token', r.access_token);
+      localStorage.setItem('user', JSON.stringify(r.user));
       setToken(r.access_token);
       setUser(r.user);
       setNotice('');
@@ -135,6 +150,7 @@ function App() {
       }
     } catch (e) { showNotice((e as Error).message, true); }
   }
+
 
   // ── Chat ─────────────────────────────────────────────────────────────────
   async function ask(e: FormEvent) {
@@ -275,7 +291,19 @@ function App() {
                       </span>
                     )}
                   </div>
-                  <p>{m.content}</p>
+                  <div className="msg-content">
+                    {m.content.split('\n').map((line, idx) => {
+                      const trimmed = line.trim();
+                      if (!trimmed) return <div key={idx} style={{ height: '0.4em' }} />;
+                      if (trimmed.startsWith('### ')) {
+                        return <h4 key={idx} style={{ margin: '0.5em 0 0.2em', fontWeight: 600 }}>{trimmed.slice(4)}</h4>;
+                      }
+                      if (trimmed.startsWith('• ') || trimmed.startsWith('- ')) {
+                        return <div key={idx} style={{ paddingLeft: '0.8em', margin: '0.15em 0' }}>• {trimmed.slice(2)}</div>;
+                      }
+                      return <p key={idx} style={{ margin: '0.25em 0' }}>{line}</p>;
+                    })}
+                  </div>
                   {m.role === 'assistant' && m.confidence !== undefined && (
                     <div className="msg-confidence">Confidence: {Math.round((m.confidence ?? 0) * 100)}%</div>
                   )}
@@ -344,7 +372,7 @@ function App() {
                     <span className="run-agent">{(r.agent_id || 'supervisor').replace(/_/g, ' ')}</span>
                     <span className="run-query" title={r.query}>{r.query}</span>
                     <span className="run-latency">{r.latency_ms} ms</span>
-                    <span className="run-time">{r.created_at ? new Date(r.created_at.endsWith('Z') ? r.created_at : r.created_at + 'Z').toLocaleTimeString() : '—'}</span>
+                    <span className="run-time">{parseIsoDate(r.created_at)?.toLocaleTimeString() || '—'}</span>
                   </div>
                 ))}
               </div>
@@ -360,11 +388,12 @@ function App() {
               <div className="row" key={d.id}>
                 <span>
                   <b>{d.filename}</b>
-                  <small>{d.status} · {d.created_at ? new Date(d.created_at.endsWith('Z') ? d.created_at : d.created_at + 'Z').toLocaleString() : '—'}</small>
+                  <small>{d.status} · {parseIsoDate(d.created_at)?.toLocaleString() || '—'}</small>
                 </span>
                 <button onClick={() => remove(d.id)}>Delete</button>
               </div>
             )) : (
+
               <div>
                 <p style={{ color: '#65716a', marginTop: 0 }}>No documents uploaded yet.</p>
                 <p style={{ fontSize: 14, color: '#65716a' }}>

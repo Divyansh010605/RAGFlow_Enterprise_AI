@@ -7,8 +7,10 @@ from .config import GEMINI_API_KEY, GEMINI_MODEL, NEO4J_PASSWORD, NEO4J_URI, QDR
 logger = logging.getLogger(__name__)
 
 class RedisCache:
-    def __init__(self):
-        self.local: dict[str, Any] = {}; self.client = None
+    def __init__(self, max_local: int = 500):
+        self.local: dict[str, Any] = {}
+        self.max_local = max_local
+        self.client = None
         if REDIS_URL:
             try:
                 import redis; self.client = redis.from_url(REDIS_URL, decode_responses=True); self.client.ping()
@@ -21,12 +23,15 @@ class RedisCache:
                 import json; value=self.client.get(key); return json.loads(value) if value else None
             except Exception: pass
         return self.local.get(key)
-    def put(self,key,value,ttl=900):
+    def put(self, key, value, ttl=900):
         if self.client:
             try:
-                import json; self.client.setex(key,ttl,json.dumps(value)); return
+                import json; self.client.setex(key, ttl, json.dumps(value)); return
             except Exception: pass
-        self.local[key]=value
+        if len(self.local) >= self.max_local:
+            oldest = next(iter(self.local), None)
+            if oldest: del self.local[oldest]
+        self.local[key] = value
 
 cache = RedisCache()
 
@@ -44,7 +49,7 @@ def answer_with_llm(question: str, evidence: list[dict], custom_system_prompt: s
         "Always mention the source document names when stating facts."
     )
 
-    models_to_try = [GEMINI_MODEL, "gemini-2.5-flash", "gemini-3.6-flash"]
+    models_to_try = [GEMINI_MODEL, "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
     models_to_try = list(dict.fromkeys([m for m in models_to_try if m]))
 
     try:
@@ -71,15 +76,30 @@ def answer_with_llm(question: str, evidence: list[dict], custom_system_prompt: s
 
     return None
 
+_neo4j_driver = None
+
+def get_neo4j_driver():
+    global _neo4j_driver
+    if _neo4j_driver is None and NEO4J_URI:
+        try:
+            from neo4j import GraphDatabase
+            _neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=("neo4j", NEO4J_PASSWORD))
+        except Exception as exc:
+            logger.warning("Unable to initialize Neo4j driver: %s", exc)
+            _neo4j_driver = None
+    return _neo4j_driver
+
 def cypher_read(query: str, parameters: dict | None = None) -> list[dict]:
     if not NEO4J_URI: return []
     normalized=" ".join(query.split()).lower()
     if not normalized.startswith("match") or any(word in normalized for word in ("create","merge","delete","set","drop","call")):
         raise ValueError("Only read-only MATCH Cypher queries are allowed")
     try:
-        from neo4j import GraphDatabase
-        driver=GraphDatabase.driver(NEO4J_URI, auth=("neo4j",NEO4J_PASSWORD))
-        with driver.session() as session: return [record.data() for record in session.run(query, parameters or {})]
+        driver = get_neo4j_driver()
+        if not driver: return []
+        with driver.session() as session:
+            return [record.data() for record in session.run(query, parameters or {})]
     except Exception as exc:
         logger.warning("Neo4j query failed: %s", exc)
         return []
+

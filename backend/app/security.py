@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 import jwt
@@ -34,12 +35,12 @@ def audit(user_id: str | None, action: str, resource: str):
     with connection() as conn: conn.execute("INSERT INTO audit_logs(id,user_id,action,resource) VALUES(?,?,?,?)", (str(uuid4()), user_id, action, resource))
 
 def validate_read_only_sql(query: str) -> str:
-    # BUG-22 fix: strip trailing semicolons FIRST, then check for any remaining semicolons
-    # (the old code checked the stripped copy against ";" which always passed for "SELECT 1; DROP TABLE users")
     stripped = " ".join(query.strip().split()).rstrip(";")
     if not stripped.lower().startswith("select") or ";" in stripped:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Only one read-only SELECT statement is permitted")
-    blocked = ("insert", "update", "delete", "drop", "alter", "truncate", "attach", "pragma")
-    if any(word in stripped.lower() for word in blocked):
+    blocked = ("insert", "update", "delete", "drop", "alter", "truncate", "attach", "pragma", "create")
+    lower_query = stripped.lower()
+    if any(re.search(r"\b" + re.escape(word) + r"\b", lower_query) for word in blocked):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unsafe SQL keyword blocked")
     return stripped
+
